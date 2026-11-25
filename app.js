@@ -349,7 +349,7 @@ class Component extends DCLogic {
     put(Object.assign({}, c || { r: {} }, { busy: true }));
     let r;
     try { r = await lookupCalls(b, libs, this.state.isbnMap, this.props.api.libPost); } catch (e) { r = { at: Date.now(), r: {}, err: 'net' }; }
-    if (!r.err) CallCache.put(id, r);
+    if (!r.err || r.err === 'gbkey') CallCache.put(id, Object.assign({}, r, { at: r.err ? Date.now() - CALL_TTL + 600000 : r.at }));   // 키 오류는 10분 뒤 다시
     put(r.err && c ? Object.assign({}, c, { err: r.err }) : r);
   }
   // 도서관별 목록: 강북 청구기호를 한꺼번에 (한 번에 최대 30권)
@@ -913,7 +913,9 @@ class Component extends DCLogic {
       const cc = BK[rb.id] ? s.calls[rb.id] : null;
       v.rCalls = cc ? Object.keys(cc.r || {}).map((li) => callLine(+li, cc.r[li])) : [];
       v.rHasCalls = v.rCalls.length > 0;
-      v.rCallMsg = !cc ? '' : cc.busy ? '청구기호·대출 상태 확인 중…' : cc.err === 'old' ? '청구기호: 구글 시트 코드가 아직 예전 판이에요 (새 코드 붙여 넣고 배포 관리 → 새 버전)' : cc.err ? '청구기호를 불러오지 못했어요 (인터넷 확인)' : '';
+      v.rCallMsg = !cc ? '' : cc.busy ? '청구기호·대출 상태 확인 중…' : cc.err === 'old' ? '청구기호: 구글 시트 코드가 아직 예전 판이에요 (새 코드 붙여 넣고 배포 관리 → 새 버전)'
+        : cc.err === 'gbkey' ? '강북 청구기호: 공공데이터포털 인증키가 강북 쪽에 아직 등록되지 않았대요 (활용신청 상태 확인 필요)'
+        : cc.err === 'gb' ? '강북 청구기호: 강북 쪽 서버 오류' : cc.err ? '청구기호를 불러오지 못했어요 (인터넷 확인)' : '';
       // 청구기호 상자에 나온 도서관은 칩에서 빼서 두 번 안 보이게
       if (v.rHasCalls) { const shown = Object.keys(cc.r).map(Number); v.rChips = v.rChips.filter((c) => c.lib == null || !shown.includes(c.lib)); v.rHasChips = true; }
       v.rChipNote = v.rChips.some((c) => /\d{3}/.test(c.text)) ? '칩 숫자 = 그 도서관 분류번호(서가 번호)' + (v.rHasCalls ? '' : ' · 그 서가에서 저자 이름으로 찾아요') : '';
@@ -1666,11 +1668,16 @@ async function lookupCalls(b, libs, isbnMap, post) {
   if (!reqs.length) return out;
   let res = await post(reqs, false);
   if (!res || !Array.isArray(res.res)) { out.err = 'old'; return out; }       // 시트 코드가 아직 예전 판
-  let gbItems = [], kItems = [], bad = false;
+  let gbItems = [], kItems = [], bad = false, gbErr = '';
   res.res.forEach((x, i) => {
-    if (what[i] === 'gb') { const p = x.ok ? parseGb(x.text) : null; if (p) gbItems = gbItems.concat(p.items); else bad = true; }
+    if (what[i] === 'gb') {
+      const p = x.ok ? parseGb(x.text) : null;
+      if (p && p.code && p.code !== '00') gbErr = p.code === '99' || /NOT REGISTERED/i.test(p.msg) ? 'gbkey' : 'gb';
+      if (p) gbItems = gbItems.concat(p.items); else bad = true;
+    }
     else { const p = x.ok ? parseKolis(x.text) : null; if (p) kItems = kItems.concat(p); else bad = true; }
   });
+  if (gbErr) { out.err = gbErr; return out; }                              // 인증키 문제는 다시 물어봐도 같음
   // 강북: 첫 검색어로 못 찾으면 짧은 검색어로 한 번 더
   if (libs.includes(0) && !pickItems(gbItems, isbns, b) && gbKeywords(b).length > 1) {
     const r2 = await post([{ src: 'gb', q: { keyword: gbKeywords(b)[1], lib: 'MA', n: 100 } }], false);
@@ -1694,26 +1701,19 @@ function callLine(li, g) {
     stStyle: 'font-size: 12px; font-weight: 700; color: ' + (g.st === '대출 가능' ? '#0F766E' : g.st ? '#B45309' : '#8A9590') };
 }
 // 설정 화면 '도서관 연결 점검' (앱 버전마다 한 번은 저절로도 실행 → 시트 '도서관점검'에 원문이 남음)
-const PROBE_VER = 'p1';
-const PROBE = [
-  { src: 'gb', q: { keyword: 'Rosie', lib: 'MA', n: 20 } },
-  { src: 'nowon', q: { path: '/search/tot' } },
-  { src: 'nowon', q: { path: '/search/tot/result?st=KWRD&si=TOTAL&q=9780020437505' } },
-  { src: 'sb', q: { path: '/jwlib/index.do' } },
-  { src: 'sb', q: { path: '/' } },
-];
+// 노원·성북 홈페이지는 구글 서버에서 접속이 막혀 있어서(사용할 수 없는 주소) 점검에서 뺌 → 집 컴퓨터에서 모음
+const PROBE_VER = 'p2';
+const PROBE = [{ src: 'gb', q: { keyword: 'Rosie', lib: 'MA', n: 20 } }];
 async function libDiag(post, ask) {
   const res = await post(PROBE, true);
   if (!res || !Array.isArray(res.res)) return '시트 코드가 아직 예전 판이에요 (새 코드로 바꾸고 새 버전으로 배포해 주세요)';
   try { localStorage.setItem('jamsu.probe', PROBE_VER); } catch (e) { /* 무시 */ }
-  const [g, n1, n2, s1, s2] = res.res;
+  const [g] = res.res;
   const pg = g.ok ? parseGb(g.text) : null;
-  const st = (x) => x.error || (x.status + (x.ok ? ' · ' + Math.round(x.text.length / 1024) + 'KB' : ''));
   let nl = '';
   try { const r = await ask('9788954926379'); nl = r && r.info && r.info.t ? '찾음(' + r.info.t + ')' : r && r.nokey ? '키 없음' : '못 찾음'; } catch (e) { nl = '오류'; }
-  return ['강북: ' + (g.error || (pg ? (pg.code && pg.code !== '00' ? '오류 ' + pg.code + ' ' + pg.msg : pg.items.length + '건' + (pg.items[0] ? ' (' + pg.items[0].cn + ')' : '')) : '응답 ' + g.status)),
-    'ISBN 서지: ' + nl,
-    '노원: ' + st(n1) + ' / ' + st(n2), '성북: ' + st(s1) + ' / ' + st(s2)].join(' · ');
+  return ['강북: ' + (g.error || (pg ? (pg.code && pg.code !== '00' ? '오류 ' + pg.code + ' ' + pg.msg + (pg.code === '99' || /NOT REGISTERED/i.test(pg.msg) ? ' (공공데이터포털 인증키가 강북 쪽에 아직 등록 안 됨)' : '') : pg.items.length + '건' + (pg.items[0] ? ' (' + pg.items[0].cn + ')' : '')) : '응답 ' + g.status)),
+    'ISBN 서지: ' + nl, '월계·장위: 집 컴퓨터에서 모으는 방식으로 준비 중'].join(' · ');
 }
 async function autoProbe(post, ask) {
   let v = '';
