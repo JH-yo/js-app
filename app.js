@@ -141,7 +141,13 @@ function libChips(b, home) {
   // 시리즈의 한 권(잠수네에는 시리즈로만 있음)이면 그 시리즈를 가진 도서관을 보여 줌
   const L = (b.libs && b.libs.length) || b.sp || !b.link || !BK[b.link] ? b : BK[b.link];
   // x = [도서관, 그 도서관 분류번호(여러 판이면 ·로), 1=같은 판인지 불확실]
-  const out = (L.libs || []).map((x, i) => ({ text: LIBS[x[0]] + (x[1] ? ' ' + x[1] : '') + (x[2] ? ' ?' : ''), style: x[2] ? CHIP_DASH : i === 0 ? CHIP_MAIN : CHIP }));
+  // 청구기호를 불러온 적 있으면(책을 열었거나 '청구기호 불러오기') 분류번호 대신 진짜 청구기호
+  const cc = typeof CallCache !== 'undefined' ? CallCache.get(L.id) : null;
+  const out = (L.libs || []).map((x, i) => {
+    const g = cc && Date.now() - cc.at < CALL_KEEP && cc.r && cc.r[x[0]];
+    if (g && g.cn.length) return { lib: x[0], text: LIBS[x[0]] + ' ' + g.cn[0] + (g.sure ? '' : ' ?'), style: g.sure ? (i === 0 ? CHIP_MAIN : CHIP) : CHIP_DASH };
+    return { lib: x[0], text: LIBS[x[0]] + (x[1] ? ' ' + x[1] : '') + (x[2] ? ' ?' : ''), style: x[2] ? CHIP_DASH : i === 0 ? CHIP_MAIN : CHIP };
+  });
   if (home) out.unshift({ text: '우리집 책', style: CHIP_HOME });
   if (b.sr) out.push({ text: '잠수네 ' + b.sr + ' 중 한 권', style: CHIP });
   if (LIB_DATA && !(L.libs || []).length && L.sp) out.push({ text: '예비 · 월계어린이' + (L.sp !== '있음' ? ' ' + L.sp : '') + '에 있음', style: CHIP_DASH });
@@ -907,7 +913,9 @@ class Component extends DCLogic {
       const cc = BK[rb.id] ? s.calls[rb.id] : null;
       v.rCalls = cc ? Object.keys(cc.r || {}).map((li) => callLine(+li, cc.r[li])) : [];
       v.rHasCalls = v.rCalls.length > 0;
-      v.rCallMsg = !cc ? '' : cc.busy ? '청구기호·대출 상태 확인 중…' : cc.err === 'old' ? '' : cc.err ? '청구기호를 불러오지 못했어요 (인터넷 확인)' : '';
+      v.rCallMsg = !cc ? '' : cc.busy ? '청구기호·대출 상태 확인 중…' : cc.err === 'old' ? '청구기호: 구글 시트 코드가 아직 예전 판이에요 (새 코드 붙여 넣고 배포 관리 → 새 버전)' : cc.err ? '청구기호를 불러오지 못했어요 (인터넷 확인)' : '';
+      // 청구기호 상자에 나온 도서관은 칩에서 빼서 두 번 안 보이게
+      if (v.rHasCalls) { const shown = Object.keys(cc.r).map(Number); v.rChips = v.rChips.filter((c) => c.lib == null || !shown.includes(c.lib)); v.rHasChips = true; }
       v.rChipNote = v.rChips.some((c) => /\d{3}/.test(c.text)) ? '칩 숫자 = 그 도서관 분류번호(서가 번호)' + (v.rHasCalls ? '' : ' · 그 서가에서 저자 이름으로 찾아요') : '';
       v.rShowLang = isNew && !rb.link;
       const lang = r.lang || 'ko';
