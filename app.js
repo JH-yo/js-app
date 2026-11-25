@@ -1659,41 +1659,51 @@ function pickItems(items, isbns, b) {
   const st = sts.includes('대출 가능') ? '대출 가능' : sts[0] || '';
   return { cn: cns.slice(0, 4), more: Math.max(0, cns.length - 4), st, n: hit.length, sure };
 }
+// 강북 API 검색 한 번: 인증키 파라미터 이름(ServiceKey / serviceKey)은 되는 쪽을 기억
+const GB_URL = 'http://openapi.gblib.or.kr/OpenAPI/service/SearchBook/getSearchBook';
+const GB_VARIANTS = ['ServiceKey', 'serviceKey'];
+function gbVariant() { try { return localStorage.getItem('jamsu.gbk') || GB_VARIANTS[0]; } catch (e) { return GB_VARIANTS[0]; } }
+function gbReq(kw, n, v) {
+  return { src: 'api', q: { url: GB_URL + '?' + v + '={GB_KEY}&keyword=' + encodeURIComponent(kw) + '&lib=MA&numOfRows=' + (n || 100) + '&pageNo=1' } };
+}
+async function gbSearch(kw, post, log) {
+  const first = gbVariant();
+  const order = [first].concat(GB_VARIANTS.filter((v) => v !== first));
+  let last = { items: [], err: '' };
+  for (const v of order) {
+    const res = await post([gbReq(kw, 100, v)], log);
+    if (!res || !Array.isArray(res.res)) return { items: [], err: 'old' };
+    let x = res.res[0];
+    if (x && x.error === '허용 안 된 요청') {                       // 시트 코드가 'api'를 모르는 예전 판 → 예전 방식
+      const r2 = await post([{ src: 'gb', q: { keyword: kw, lib: 'MA', n: 100 } }], log);
+      x = r2 && r2.res && r2.res[0];
+    }
+    const p = x && x.ok ? parseGb(x.text) : null;
+    if (!p) { last = { items: [], err: 'bad' }; continue; }
+    if (p.code && p.code !== '00') { last = { items: [], err: p.code === '99' || /NOT REGISTERED/i.test(p.msg) ? 'gbkey' : 'gb', msg: p.code + ' ' + p.msg }; continue; }
+    if (v !== first) { try { localStorage.setItem('jamsu.gbk', v); } catch (e) { /* 무시 */ } }
+    return { items: p.items, err: '', variant: v };
+  }
+  return last;
+}
 // 책 하나 → { at, r: { 0: {cn[], st, sure}, ... }, err }
 async function lookupCalls(b, libs, isbnMap, post) {
   const isbns = isbnsOf(b.id, isbnMap);
   const out = { at: Date.now(), r: {}, err: '' };
-  const reqs = [], what = [];
-  if (libs.includes(0)) gbKeywords(b).slice(0, 1).forEach((kw) => { reqs.push({ src: 'gb', q: { keyword: kw, lib: 'MA', n: 100 } }); what.push('gb'); });
-  if (!reqs.length) return out;
-  let res = await post(reqs, false);
-  if (!res || !Array.isArray(res.res)) { out.err = 'old'; return out; }       // 시트 코드가 아직 예전 판
-  let gbItems = [], kItems = [], bad = false, gbErr = '';
-  res.res.forEach((x, i) => {
-    if (what[i] === 'gb') {
-      const p = x.ok ? parseGb(x.text) : null;
-      if (p && p.code && p.code !== '00') gbErr = p.code === '99' || /NOT REGISTERED/i.test(p.msg) ? 'gbkey' : 'gb';
-      if (p) gbItems = gbItems.concat(p.items); else bad = true;
-    }
-    else { const p = x.ok ? parseKolis(x.text) : null; if (p) kItems = kItems.concat(p); else bad = true; }
-  });
-  if (gbErr) { out.err = gbErr; return out; }                              // 인증키 문제는 다시 물어봐도 같음
-  // 강북: 첫 검색어로 못 찾으면 짧은 검색어로 한 번 더
-  if (libs.includes(0) && !pickItems(gbItems, isbns, b) && gbKeywords(b).length > 1) {
-    const r2 = await post([{ src: 'gb', q: { keyword: gbKeywords(b)[1], lib: 'MA', n: 100 } }], false);
-    const p = r2 && r2.res && r2.res[0] && r2.res[0].ok ? parseGb(r2.res[0].text) : null;
-    if (p) gbItems = gbItems.concat(p.items);
+  if (!libs.includes(0)) return out;                     // 월계·장위·월계어린이는 집 컴퓨터에서 모은 청구기호로 (준비 중)
+  const kws = gbKeywords(b);
+  if (!kws.length) return out;
+  let r = await gbSearch(kws[0], post, false);
+  if (r.err === 'old' || r.err === 'gbkey' || r.err === 'gb') { out.err = r.err; return out; }
+  let items = r.items;
+  // 첫 검색어로 못 찾으면 짧은 검색어로 한 번 더
+  if (!pickItems(items, isbns, b) && kws.length > 1) {
+    const r2 = await gbSearch(kws[1], post, false);
+    if (!r2.err) items = items.concat(r2.items);
   }
-  if (libs.includes(0)) { const g = pickItems(gbItems, isbns, b); if (g) out.r[0] = g; }
-  [1, 2, 3].filter((l) => libs.includes(l)).forEach((l) => {
-    const xs = kItems.filter((x) => libOfPlace(x.place) === l).map((x) => ({ t: x.t, a: '', isbn: x.isbn, cn: x.cn, st: '' }));
-    const g = pickItems(xs, isbns, b);
-    if (g) out.r[l] = g;
-  });
-  // 해석이 안 되거나 못 찾은 응답은 시트 '도서관점검'에 남겨서 나중에 고칠 수 있게
-  if (bad || (libs.includes(0) && !out.r[0])) {
-    try { await post(reqs.slice(0, 3), true); } catch (e) { /* 무시 */ }
-  }
+  const g = pickItems(items, isbns, b);
+  if (g) out.r[0] = g;
+  else { try { await post([gbReq(kws[0], 100, gbVariant())], true); } catch (e) { /* 점검 기록만 */ } }
   return out;
 }
 function callLine(li, g) {
@@ -1701,19 +1711,24 @@ function callLine(li, g) {
     stStyle: 'font-size: 12px; font-weight: 700; color: ' + (g.st === '대출 가능' ? '#0F766E' : g.st ? '#B45309' : '#8A9590') };
 }
 // 설정 화면 '도서관 연결 점검' (앱 버전마다 한 번은 저절로도 실행 → 시트 '도서관점검'에 원문이 남음)
-// 노원·성북 홈페이지는 구글 서버에서 접속이 막혀 있어서(사용할 수 없는 주소) 점검에서 뺌 → 집 컴퓨터에서 모음
-const PROBE_VER = 'p2';
-const PROBE = [{ src: 'gb', q: { keyword: 'Rosie', lib: 'MA', n: 20 } }];
+// 설정 '도서관 연결 점검' (앱 판이 바뀌면 한 번 저절로) — 강북 API를 인증키 이름 두 가지로 시험
+const PROBE_VER = 'p3';
 async function libDiag(post, ask) {
-  const res = await post(PROBE, true);
-  if (!res || !Array.isArray(res.res)) return '시트 코드가 아직 예전 판이에요 (새 코드로 바꾸고 새 버전으로 배포해 주세요)';
+  const reqs = GB_VARIANTS.map((v) => gbReq('Rosie', 20, v));
+  const res = await post(reqs, true);
+  if (!res || !Array.isArray(res.res)) return '시트 코드가 아직 예전 판이에요 (새 코드로 바꾸고 배포 관리 → 새 버전)';
   try { localStorage.setItem('jamsu.probe', PROBE_VER); } catch (e) { /* 무시 */ }
-  const [g] = res.res;
-  const pg = g.ok ? parseGb(g.text) : null;
+  const parts = res.res.map((x, i) => {
+    if (x.error) return GB_VARIANTS[i] + ': ' + (x.error === '허용 안 된 요청' ? '시트 코드 예전 판' : x.error);
+    const p = x.ok ? parseGb(x.text) : null;
+    if (!p) return GB_VARIANTS[i] + ': 응답 ' + x.status;
+    if (p.code && p.code !== '00') return GB_VARIANTS[i] + ': 오류 ' + p.code + ' ' + p.msg;
+    try { localStorage.setItem('jamsu.gbk', GB_VARIANTS[i]); } catch (e) { /* 무시 */ }
+    return GB_VARIANTS[i] + ': 성공 ' + p.items.length + '건' + (p.items[0] ? ' (' + p.items[0].cn + ' · ' + stText(p.items[0].st) + ')' : '');
+  });
   let nl = '';
   try { const r = await ask('9788954926379'); nl = r && r.info && r.info.t ? '찾음(' + r.info.t + ')' : r && r.nokey ? '키 없음' : '못 찾음'; } catch (e) { nl = '오류'; }
-  return ['강북: ' + (g.error || (pg ? (pg.code && pg.code !== '00' ? '오류 ' + pg.code + ' ' + pg.msg + (pg.code === '99' || /NOT REGISTERED/i.test(pg.msg) ? ' (공공데이터포털 인증키가 강북 쪽에 아직 등록 안 됨)' : '') : pg.items.length + '건' + (pg.items[0] ? ' (' + pg.items[0].cn + ')' : '')) : '응답 ' + g.status)),
-    'ISBN 서지: ' + nl, '월계·장위: 집 컴퓨터에서 모으는 방식으로 준비 중'].join(' · ');
+  return ['강북 ' + parts.join(' / '), 'ISBN 서지: ' + nl, '월계·장위: 집 컴퓨터에서 모으는 방식으로 준비 중'].join(' · ');
 }
 async function autoProbe(post, ask) {
   let v = '';
