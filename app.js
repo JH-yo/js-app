@@ -1556,7 +1556,8 @@ async function findIsbn(isbn, st, ask) {
 // ---- 도서관 청구기호 · 대출 상태
 // 앱이 직접 못 가는 곳(http 주소, 인증키 필요)은 우리 구글 시트(Apps Script)가 대신 가져다 줌: a='lib'
 //   gb    = 강북구 도서관 Open API (강북문화정보도서관 청구기호·도서상태)
-//   kolis = 국립중앙도서관 KOLIS-NET 종합목록 (월계·월계어린이·장위가 올린 소장 정보 — 시험 중)
+//   nowon / sb = 노원구립·성북구립 도서관 홈페이지 검색 (월계·월계어린이·장위 — 화면 구조 확인 중)
+//   (국립중앙도서관 KOLIS-NET 종합목록은 확인해 보니 소장처·청구기호 칸이 비어 있어서 안 씀)
 // 해석은 여기(앱)에서 함 → 고칠 때 시트 코드는 그대로 두고 앱만 바꾸면 됨
 const CALL_KEY = 'jamsu.call.v1';
 const CALL_TTL = 6 * 3600 * 1000;           // 대출 상태 때문에 6시간마다 새로
@@ -1654,8 +1655,6 @@ async function lookupCalls(b, libs, isbnMap, post) {
   const out = { at: Date.now(), r: {}, err: '' };
   const reqs = [], what = [];
   if (libs.includes(0)) gbKeywords(b).slice(0, 1).forEach((kw) => { reqs.push({ src: 'gb', q: { keyword: kw, lib: 'MA', n: 100 } }); what.push('gb'); });
-  // 월계·장위·월계어린이: 국립중앙도서관 종합목록을 ISBN으로 (시험 중)
-  if (libs.some((l) => l > 0) && isbns.length) isbns.slice(0, 2).forEach((i) => { reqs.push({ src: 'kolis', q: { params: { srchTarget: 'total', kwd: i, pageNum: 1, pageSize: 100 } } }); what.push('kolis'); });
   if (!reqs.length) return out;
   let res = await post(reqs, false);
   if (!res || !Array.isArray(res.res)) { out.err = 'old'; return out; }       // 시트 코드가 아직 예전 판
@@ -1677,7 +1676,7 @@ async function lookupCalls(b, libs, isbnMap, post) {
     if (g) out.r[l] = g;
   });
   // 해석이 안 되거나 못 찾은 응답은 시트 '도서관점검'에 남겨서 나중에 고칠 수 있게
-  if (bad || (libs.includes(0) && !out.r[0]) || (libs.some((l) => l > 0) && ![1, 2, 3].some((l) => out.r[l]))) {
+  if (bad || (libs.includes(0) && !out.r[0])) {
     try { await post(reqs.slice(0, 3), true); } catch (e) { /* 무시 */ }
   }
   return out;
@@ -1686,24 +1685,33 @@ function callLine(li, g) {
   return { lib: LIB_SHORT[li], cn: g.cn.join(' · ') + (g.more ? ' 외 ' + g.more : '') + (g.sure ? '' : ' ?'), st: g.st,
     stStyle: 'font-size: 12px; font-weight: 700; color: ' + (g.st === '대출 가능' ? '#0F766E' : g.st ? '#B45309' : '#8A9590') };
 }
-// 설정 화면 '도서관 연결 점검'
+// 설정 화면 '도서관 연결 점검' (앱 버전마다 한 번은 저절로도 실행 → 시트 '도서관점검'에 원문이 남음)
+const PROBE_VER = 'p1';
+const PROBE = [
+  { src: 'gb', q: { keyword: 'Rosie', lib: 'MA', n: 20 } },
+  { src: 'nowon', q: { path: '/search/tot' } },
+  { src: 'nowon', q: { path: '/search/tot/result?st=KWRD&si=TOTAL&q=9780020437505' } },
+  { src: 'sb', q: { path: '/jwlib/index.do' } },
+  { src: 'sb', q: { path: '/' } },
+];
 async function libDiag(post, ask) {
-  const reqs = [
-    { src: 'gb', q: { keyword: 'Skip through the seasons', lib: 'MA', n: 20 } },
-    { src: 'kolis', q: { params: { srchTarget: 'total', kwd: '9781905236718', pageNum: 1, pageSize: 50 } } },
-    { src: 'nowon', q: { path: '/' } },
-    { src: 'sb', q: { path: '/' } },
-  ];
-  const res = await post(reqs, true);
+  const res = await post(PROBE, true);
   if (!res || !Array.isArray(res.res)) return '시트 코드가 아직 예전 판이에요 (새 코드로 바꾸고 새 버전으로 배포해 주세요)';
-  const [g, k, n, s] = res.res;
-  const pg = g.ok ? parseGb(g.text) : null, pk = k.ok ? parseKolis(k.text) : null;
+  try { localStorage.setItem('jamsu.probe', PROBE_VER); } catch (e) { /* 무시 */ }
+  const [g, n1, n2, s1, s2] = res.res;
+  const pg = g.ok ? parseGb(g.text) : null;
+  const st = (x) => x.error || (x.status + (x.ok ? ' · ' + Math.round(x.text.length / 1024) + 'KB' : ''));
   let nl = '';
   try { const r = await ask('9788954926379'); nl = r && r.info && r.info.t ? '찾음(' + r.info.t + ')' : r && r.nokey ? '키 없음' : '못 찾음'; } catch (e) { nl = '오류'; }
-  return ['강북: ' + (g.error || (pg ? (pg.code && pg.code !== '00' ? '오류 ' + pg.code + ' ' + pg.msg : pg.items.length + '건') : '응답 ' + g.status)),
-    '종합목록: ' + (k.error || (pk ? pk.length + '건 · ' + pk.map((x) => x.place).filter((p, i, a) => a.indexOf(p) === i).slice(0, 3).join(', ') : '응답 ' + k.status)),
+  return ['강북: ' + (g.error || (pg ? (pg.code && pg.code !== '00' ? '오류 ' + pg.code + ' ' + pg.msg : pg.items.length + '건' + (pg.items[0] ? ' (' + pg.items[0].cn + ')' : '')) : '응답 ' + g.status)),
     'ISBN 서지: ' + nl,
-    '노원 홈페이지: ' + (n.error || n.status), '성북 홈페이지: ' + (s.error || s.status)].join(' · ');
+    '노원: ' + st(n1) + ' / ' + st(n2), '성북: ' + st(s1) + ' / ' + st(s2)].join(' · ');
+}
+async function autoProbe(post, ask) {
+  let v = '';
+  try { v = localStorage.getItem('jamsu.probe') || ''; } catch (e) { return; }
+  if (v === PROBE_VER) return;
+  try { await libDiag(post, ask); } catch (e) { /* 다음에 */ }
 }
 
 // ---- 엑셀(.xlsx) 파일을 폰에서 바로 만들기 (압축 없는 zip + 시트 XML)
@@ -1941,6 +1949,8 @@ async function boot() {
   Sync.logic = logic;
   ROOT.innerHTML = '';
   render(h(App, { logic }), ROOT);
+  // 도서관 연결 점검: 앱이 바뀐 뒤 한 번 저절로 (시트 '도서관점검'에 원문이 남아 화면 구조를 확인할 수 있음)
+  setTimeout(() => { if (navigator.onLine !== false) autoProbe(api.libPost, api.isbnAsk); }, 8000);
   if (Sync.queue.length) Sync.flush();
   if (Date.now() - Sync.lastLoad > 15000) Sync.load().catch(() => {});
   let today = TODAY;
