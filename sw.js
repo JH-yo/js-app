@@ -1,7 +1,7 @@
 // 오프라인에서도 열리게: 앱 파일은 '새것 먼저, 안 되면 저장본', 잠수네 자료는 버전별로 한 번만 받음
-const V = 'jamsu-shell-c7bee88b';
+const V = 'jamsu-shell-28fda7b4';
 const DATA = 'jamsu-data';
-const SHELL = ['./', './index.html', './app.js?v=c7bee88b', './preact.mjs', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png'];
+const SHELL = ['./', './index.html', './app.js?v=28fda7b4', './preact.mjs', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png'];
 self.addEventListener('install', (e) => { e.waitUntil(caches.open(V).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting())); });
 self.addEventListener('activate', (e) => {
   e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => k !== V && k !== DATA).map((k) => caches.delete(k)))).then(() => self.clients.claim()));
