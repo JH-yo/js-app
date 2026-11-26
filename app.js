@@ -350,7 +350,7 @@ class Component extends DCLogic {
     put(Object.assign({}, c || { r: {} }, { busy: true }));
     let r;
     try { r = await lookupCalls(b, libs, this.state.isbnMap, this.props.api.libPost); } catch (e) { r = { at: Date.now(), r: {}, err: 'net' }; }
-    if (!r.err || r.err === 'gbkey') CallCache.put(id, Object.assign({}, r, { at: r.err ? Date.now() - CALL_TTL + 600000 : r.at }));   // 키 오류는 10분 뒤 다시
+    if (!r.err || r.err === 'gbkey' || r.err === 'gbquota') CallCache.put(id, Object.assign({}, r, { at: r.err ? Date.now() - CALL_TTL + (r.err === 'gbquota' ? 3600000 : 600000) : r.at }));   // 키 오류 10분, 한도 초과 1시간 뒤 다시
     put(r.err && c ? Object.assign({}, c, { err: r.err }) : r);
   }
   // 목록에 보이는 강북 책은 저절로 청구기호를 받아 둠 (버튼 없이, 폰에 30일 보관)
@@ -358,6 +358,7 @@ class Component extends DCLogic {
     const b = BK[id];
     if (!b || !b.libs.some((x) => x[0] === 0) || !this.props.api.libPost || this._cStop) return;
     if (CALLS[id] && CALLS[id][0]) return;                       // 미리 모아 넣은 청구기호가 있으면 안 물어봄
+    if (!AUTO_CALLS) return;                                      // 강북 API 하루 한도(약 1,000번)는 집 컴퓨터 수집에 쓰려고 목록 자동 받기는 꺼 둠
     const seen = this._cSeen || (this._cSeen = new Set());
     if (seen.has(id)) return;
     const c = CallCache.get(id);
@@ -940,6 +941,7 @@ class Component extends DCLogic {
       v.rHasCalls = v.rCalls.length > 0;
       v.rCallMsg = !cc ? '' : cc.busy ? '청구기호·대출 상태 확인 중…' : cc.err === 'old' ? '청구기호: 구글 시트 코드가 아직 예전 판이에요 (새 코드 붙여 넣고 배포 관리 → 새 버전)'
         : cc.err === 'gbkey' ? '강북 청구기호: 공공데이터포털 인증키가 강북 쪽에 아직 등록되지 않았대요 (활용신청 상태 확인 필요)'
+        : cc.err === 'gbquota' ? '강북 청구기호: 오늘 조회 한도를 다 써서 내일 다시 보여 줘요'
         : cc.err === 'gb' ? '강북 청구기호: 강북 쪽 서버 오류' : cc.err ? '청구기호를 불러오지 못했어요 (인터넷 확인)' : '';
       // 청구기호 상자에 나온 도서관은 칩에서 빼서 두 번 안 보이게
       if (v.rHasCalls) { const shown = Object.keys(cc.r).map(Number); v.rChips = v.rChips.filter((c) => c.lib == null || !shown.includes(c.lib)); v.rHasChips = true; }
@@ -1598,6 +1600,7 @@ const CALL_KEY = 'jamsu.call.v1';
 const CALL_TTL = 6 * 3600 * 1000;           // 대출 상태 때문에 6시간마다 새로
 const CALL_KEEP = 30 * 24 * 3600 * 1000;    // 목록에 보여 줄 청구기호는 30일 보관
 const LIB_SHORT = ['강북', '월계', '장위', '월계어린이'];
+const AUTO_CALLS = false;   // 목록 자동 받기 (강북 API 한도 때문에 지금은 끔 — 집 컴퓨터에서 모아 넣음)
 // 청구기호 하나 고르기: 폰에서 새로 받은 것(30일 안) → 없으면 미리 모아 넣은 것
 function callOf(id, li, cc) {
   if (cc === undefined) cc = CallCache.get(id);
@@ -1717,7 +1720,10 @@ async function gbSearch(kw, post, log) {
     }
     const p = x && x.ok ? parseGb(x.text) : null;
     if (!p) { last = { items: [], err: 'bad' }; continue; }
-    if (p.code && p.code !== '00') { last = { items: [], err: p.code === '99' || /NOT REGISTERED/i.test(p.msg) ? 'gbkey' : 'gb', msg: p.code + ' ' + p.msg }; continue; }
+    if (p.code && p.code !== '00') {
+      if (/LIMITED NUMBER/i.test(p.msg)) return { items: [], err: 'gbquota' };          // 하루 한도: 다른 키로 바꿔도 소용없음
+      last = { items: [], err: /NOT REGISTERED/i.test(p.msg) ? 'gbkey' : 'gb', msg: p.code + ' ' + p.msg }; continue;
+    }
     if (v !== first) { try { localStorage.setItem('jamsu.gbk', v); } catch (e) { /* 무시 */ } }
     return { items: p.items, err: '', variant: v };
   }
@@ -1731,7 +1737,7 @@ async function lookupCalls(b, libs, isbnMap, post) {
   const kws = gbKeywords(b);
   if (!kws.length) return out;
   let r = await gbSearch(kws[0], post, false);
-  if (r.err === 'old' || r.err === 'gbkey' || r.err === 'gb') { out.err = r.err; return out; }
+  if (r.err === 'old' || r.err === 'gbkey' || r.err === 'gb' || r.err === 'gbquota') { out.err = r.err; return out; }
   let items = r.items;
   // 첫 검색어로 못 찾으면 짧은 검색어로 한 번 더
   if (!pickItems(items, isbns, b) && kws.length > 1) {
